@@ -1,0 +1,1 @@
+/usr/bin/c++  -arch arm64 -Wl,-search_paths_first -Wl,-headerpad_max_install_names CMakeFiles/reconciliation_engine.dir/src/main.cpp.o CMakeFiles/reconciliation_engine.dir/src/database.cpp.o CMakeFiles/reconciliation_engine.dir/src/reconciliation_engine.cpp.o -o reconciliation_engine  /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/lib/libsqlite3.tbd
