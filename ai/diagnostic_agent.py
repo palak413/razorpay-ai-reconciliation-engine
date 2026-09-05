@@ -1,4 +1,5 @@
 import os
+import sys
 import json
 import sqlite3
 import time
@@ -144,3 +145,38 @@ class DiagnosticAgent:
                 conn.commit()
 
         conn.close()
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Run Gemini AI diagnostics for a reconciliation batch."
+    )
+
+    parser.add_argument(
+        "batch_id",
+        help="Batch ID to process"
+    )
+
+    parser.add_argument(
+        "--db",
+        default="database/reconciliation.db",
+        help="SQLite database path"
+    )
+
+    args = parser.parse_args()
+
+    agent = DiagnosticAgent(db_path=args.db)
+
+    print(
+        f"[AI] Processing PENDING exceptions for batch: {args.batch_id}"
+    )
+
+    try:
+        agent.process_pending_exceptions(
+            batch_id=args.batch_id
+        )
+        print("[AI] Diagnostic processing completed.")
+    except Exception as e:
+        print(f"[AI] Diagnostic process failed: {e}")
+        sys.exit(1)

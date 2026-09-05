@@ -1,9 +1,0 @@
-build/
-*.db
-*.db-shm
-*.db-wal
-__pycache__/
-.DS_Store
-.env
-*.pyc
-.vscode/

@@ -1,42 +1,35 @@
-import sqlite3
-import csv
 import os
+import sqlite3
 
 DB_PATH = "database/reconciliation.db"
 SCHEMA_PATH = "database/schema.sql"
 
-if os.path.exists(DB_PATH):
-    os.remove(DB_PATH)
 
-conn = sqlite3.connect(DB_PATH)
-cursor = conn.cursor()
+def setup_database(db_path=DB_PATH, schema_path=SCHEMA_PATH):
+    os.makedirs(os.path.dirname(db_path), exist_ok=True)
 
-with open(SCHEMA_PATH, "r") as f:
-    cursor.executescript(f.read())
+    if os.path.exists(db_path):
+        os.remove(db_path)
 
-# Load Internal Ledger
-with open("data/internal_ledger.csv", "r") as f:
-    reader = csv.DictReader(f)
-    for row in reader:
-        cursor.execute("""
-            INSERT INTO internal_transactions 
-            (transaction_id, payment_id, timestamp, amount, currency, tax, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        """, (row["transaction_id"], row["payment_id"], int(row["timestamp"]), 
-              float(row["amount"]), row["currency"], float(row["tax"]), row["status"]))
+    if not os.path.exists(schema_path):
+        raise FileNotFoundError(
+            f"Schema file not found: {schema_path}"
+        )
 
-# Load Bank Settlements
-with open("data/bank_settlement.csv", "r") as f:
-    reader = csv.DictReader(f)
-    for row in reader:
-        cursor.execute("""
-            INSERT INTO bank_settlements 
-            (settlement_id, transaction_id, settlement_timestamp, amount, currency, tax, bank_reference, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """, (row["settlement_id"], row["transaction_id"], int(row["settlement_timestamp"]), 
-              float(row["amount"]), row["currency"], float(row["tax"]), row["bank_reference"], row["status"]))
+    conn = sqlite3.connect(db_path)
 
-conn.commit()
-conn.close()
+    try:
+        with open(schema_path, "r", encoding="utf-8") as f:
+            schema_sql = f.read()
 
-print(f"Database initialized successfully at {DB_PATH} with WAL mode enabled.")
+        conn.executescript(schema_sql)
+        conn.commit()
+
+        print(f"[Setup] Database initialized: {db_path}")
+
+    finally:
+        conn.close()
+
+
+if __name__ == "__main__":
+    setup_database()
