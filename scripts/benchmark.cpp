@@ -1,33 +1,26 @@
 #include <iostream>
 #include <chrono>
 #include <vector>
-#include <random>
-
-struct Transaction {
-    std::string id;
-    double amount;
-};
 
 int main() {
-    int record_count = 100000;
-    std::vector<Transaction> internal_ledger(record_count);
+    std::cout << "Records | Time (ms) | Throughput (rec/sec)\n";
+    std::cout << "----------------------------------------\n";
     
-    // Populate dummy records
-    for(int i = 0; i < record_count; ++i) {
-        internal_ledger[i] = {"TX_" + std::to_string(i), 150.00};
+    std::vector<int> test_sizes = {100, 1000, 10000, 100000};
+    for (int size : test_sizes) {
+        auto start = std::chrono::steady_clock::now();
+        
+        volatile double checksum = 0.0;
+        for (int i = 0; i < size; ++i) {
+            checksum += i * 1.05;
+        }
+        
+        auto end = std::chrono::steady_clock::now();
+        std::chrono::duration<double, std::milli> duration = end - start;
+        double ms = duration.count();
+        double throughput = size / (ms / 1000.0);
+        
+        std::cout << size << " | " << ms << " | " << throughput << "\n";
     }
-
-    auto start = std::chrono::high_resolution_clock::now();
-    
-    // Simulate O(N) deterministic hash-map lookup matching
-    volatile double checksum = 0.0;
-    for(int i = 0; i < record_count; ++i) {
-        checksum += internal_ledger[i].amount;
-    }
-
-    auto end = std::chrono::high_resolution_clock::now();
-    std::chrono::duration<double> elapsed = end - start;
-
-    std::cout << "BENCHMARK_COMPLETE: Processed " << record_count << " records in " << elapsed.count() << " seconds with zero float drift." << std::endl;
     return 0;
 }

@@ -1,64 +1,57 @@
 PRAGMA journal_mode=WAL;
-PRAGMA synchronous=NORMAL;
-PRAGMA foreign_keys=ON;
 
-CREATE TABLE IF NOT EXISTS internal_transactions (
-    transaction_id TEXT PRIMARY KEY,
-    payment_id TEXT UNIQUE,
-    timestamp INTEGER NOT NULL,
-    amount REAL NOT NULL,
-    currency TEXT NOT NULL,
-    tax REAL NOT NULL,
-    status TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS bank_settlements (
-    settlement_id TEXT PRIMARY KEY,
-    transaction_id TEXT,
-    settlement_timestamp INTEGER NOT NULL,
-    amount REAL NOT NULL,
-    currency TEXT NOT NULL,
-    tax REAL NOT NULL,
-    bank_reference TEXT UNIQUE,
-    status TEXT NOT NULL
+CREATE TABLE IF NOT EXISTS batches (
+    batch_id TEXT PRIMARY KEY,
+    status TEXT NOT NULL,
+    started_at INTEGER NOT NULL,
+    completed_at INTEGER,
+    engine_version TEXT NOT NULL,
+    total_records INTEGER DEFAULT 0,
+    matched_records INTEGER DEFAULT 0,
+    exception_records INTEGER DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS reconciliation_results (
-    transaction_id TEXT PRIMARY KEY,
+    batch_id TEXT NOT NULL,
+    transaction_id TEXT NOT NULL,
     result TEXT NOT NULL,
-    reason TEXT,
-    internal_amount REAL,
-    external_amount REAL,
+    internal_amount INTEGER,
+    external_amount INTEGER,
+    internal_tax INTEGER,
+    external_tax INTEGER,
+    currency TEXT,
     timestamp_diff_seconds INTEGER,
-    processed_at INTEGER NOT NULL,
-    engine_version TEXT NOT NULL
+    reason TEXT,
+    PRIMARY KEY (batch_id, transaction_id),
+    FOREIGN KEY (batch_id) REFERENCES batches(batch_id)
 );
 
 CREATE TABLE IF NOT EXISTS exceptions (
-    exception_id INTEGER PRIMARY KEY AUTOINCREMENT,
-    transaction_id TEXT UNIQUE,
-    status TEXT NOT NULL,
-    internal_amount REAL,
-    external_amount REAL,
-    internal_currency TEXT,
-    external_currency TEXT,
+    batch_id TEXT NOT NULL,
+    transaction_id TEXT NOT NULL,
+    detected_status TEXT NOT NULL,
+    internal_amount INTEGER,
+    external_amount INTEGER,
+    internal_tax INTEGER,
+    external_tax INTEGER,
+    currency TEXT,
     timestamp_diff_seconds INTEGER,
+    reconciliation_reason TEXT,
+    ai_status TEXT DEFAULT 'PENDING',
     ai_classification TEXT,
     ai_confidence REAL,
     ai_reason TEXT,
     ai_recommended_action TEXT,
-    ai_status TEXT DEFAULT 'PENDING'
+    PRIMARY KEY (batch_id, transaction_id)
 );
 
 CREATE TABLE IF NOT EXISTS audit_logs (
-    log_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
     timestamp INTEGER NOT NULL,
     event_type TEXT NOT NULL,
-    transaction_id TEXT,
     batch_id TEXT,
+    transaction_id TEXT,
     component TEXT NOT NULL,
+    status TEXT NOT NULL,
     message TEXT NOT NULL
 );
-
-CREATE INDEX IF NOT EXISTS idx_bank_settlement_tx ON bank_settlements(transaction_id);
-CREATE INDEX IF NOT EXISTS idx_internal_tx_amount ON internal_transactions(amount, currency);
