@@ -1,149 +1,393 @@
 #include "database.h"
 #include <iostream>
-#include <ctime>
 
-Database::Database(const std::string& db_path) : db_path_(db_path), db_(nullptr) {}
+Database::Database(const std::string& db_path) : db_path_(db_path) {}
 
 Database::~Database() {
-    close();
+    disconnect();
 }
 
-bool Database::open() {
+void Database::log_error(const std::string& operation) {
+    if (db_) {
+        std::cerr << "[Database Error] " << operation << ": " << sqlite3_errmsg(db_) << std::endl;
+    } else {
+        std::cerr << "[Database Error] " << operation << ": Database not connected." << std::endl;
+    }
+}
+
+bool Database::connect() {
     if (sqlite3_open(db_path_.c_str(), &db_) != SQLITE_OK) {
-        std::cerr << "Failed to open DB: " << sqlite3_errmsg(db_) << std::endl;
+        log_error("sqlite3_open");
         return false;
     }
-    sqlite3_exec(db_, "PRAGMA journal_mode=WAL;", nullptr, nullptr, nullptr);
-    sqlite3_exec(db_, "PRAGMA foreign_keys=ON;", nullptr, nullptr, nullptr);
+
+    char* err_msg = nullptr;
+    if (sqlite3_exec(db_, "PRAGMA journal_mode=WAL;", nullptr, nullptr, &err_msg) != SQLITE_OK) {
+        std::cerr << "Failed to enable WAL: " << err_msg << std::endl;
+        sqlite3_free(err_msg);
+        sqlite3_close(db_);
+        db_ = nullptr;
+        return false;
+    }
+    
+    if (sqlite3_exec(db_, "PRAGMA foreign_keys=ON;", nullptr, nullptr, &err_msg) != SQLITE_OK) {
+        std::cerr << "Failed to enable foreign keys: " << err_msg << std::endl;
+        sqlite3_free(err_msg);
+        sqlite3_close(db_);
+        db_ = nullptr;
+        return false;
+    }
+
     return true;
 }
 
-void Database::close() {
+void Database::disconnect() {
     if (db_) {
         sqlite3_close(db_);
         db_ = nullptr;
     }
 }
 
-std::vector<InternalTransaction> Database::get_internal_transactions() {
-    std::vector<InternalTransaction> list;
-    const char* sql = "SELECT transaction_id, payment_id, timestamp, amount, currency, tax, status FROM internal_transactions;";
-    sqlite3_stmt* stmt;
-
-    if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
-        while (sqlite3_step(stmt) == SQLITE_ROW) {
-            InternalTransaction tx;
-            tx.transaction_id = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
-            tx.payment_id = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
-            tx.timestamp = sqlite3_column_int64(stmt, 2);
-            tx.amount = sqlite3_column_double(stmt, 3);
-            tx.currency = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 4));
-            tx.tax = sqlite3_column_double(stmt, 5);
-            tx.status = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 6));
-            list.push_back(tx);
-        }
+bool Database::begin_transaction() {
+    char* err_msg = nullptr;
+    if (sqlite3_exec(db_, "BEGIN TRANSACTION;", nullptr, nullptr, &err_msg) != SQLITE_OK) {
+        log_error("begin_transaction");
+        if (err_msg) sqlite3_free(err_msg);
+        return false;
     }
-    sqlite3_finalize(stmt);
-    return list;
-}
-
-std::vector<BankSettlement> Database::get_bank_settlements() {
-    std::vector<BankSettlement> list;
-    const char* sql = "SELECT settlement_id, transaction_id, settlement_timestamp, amount, currency, tax, bank_reference, status FROM bank_settlements;";
-    sqlite3_stmt* stmt;
-
-    if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
-        while (sqlite3_step(stmt) == SQLITE_ROW) {
-            BankSettlement bs;
-            bs.settlement_id = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
-            const unsigned char* tx_text = sqlite3_column_text(stmt, 1);
-            bs.transaction_id = tx_text ? reinterpret_cast<const char*>(tx_text) : "";
-            bs.settlement_timestamp = sqlite3_column_int64(stmt, 2);
-            bs.amount = sqlite3_column_double(stmt, 3);
-            bs.currency = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 4));
-            bs.tax = sqlite3_column_double(stmt, 5);
-            bs.bank_reference = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 6));
-            bs.status = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 7));
-            list.push_back(bs);
-        }
-    }
-    sqlite3_finalize(stmt);
-    return list;
-}
-
-bool Database::save_results_and_exceptions(
-    const std::vector<ReconciliationResult>& results,
-    const std::vector<ExceptionRecord>& exceptions,
-    const std::string& batch_id
-) {
-    sqlite3_exec(db_, "BEGIN TRANSACTION;", nullptr, nullptr, nullptr);
-
-    const char* res_sql = "INSERT OR REPLACE INTO reconciliation_results "
-                          "(transaction_id, result, reason, internal_amount, external_amount, timestamp_diff_seconds, processed_at, engine_version) "
-                          "VALUES (?, ?, ?, ?, ?, ?, ?, ?);";
-    sqlite3_stmt* res_stmt;
-    sqlite3_prepare_v2(db_, res_sql, -1, &res_stmt, nullptr);
-
-    for (const auto& r : results) {
-        sqlite3_bind_text(res_stmt, 1, r.transaction_id.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(res_stmt, 2, r.result.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(res_stmt, 3, r.reason.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_double(res_stmt, 4, r.internal_amount);
-        sqlite3_bind_double(res_stmt, 5, r.external_amount);
-        sqlite3_bind_int64(res_stmt, 6, r.timestamp_diff_seconds);
-        sqlite3_bind_int64(res_stmt, 7, r.processed_at);
-        sqlite3_bind_text(res_stmt, 8, r.engine_version.c_str(), -1, SQLITE_TRANSIENT);
-
-        if (sqlite3_step(res_stmt) != SQLITE_DONE) {
-            sqlite3_finalize(res_stmt);
-            sqlite3_exec(db_, "ROLLBACK;", nullptr, nullptr, nullptr);
-            log_audit("DB_ERROR", r.transaction_id, batch_id, "ENGINE", "Failed to insert reconciliation result");
-            return false;
-        }
-        sqlite3_reset(res_stmt);
-    }
-    sqlite3_finalize(res_stmt);
-
-    const char* exc_sql = "INSERT OR REPLACE INTO exceptions "
-                          "(transaction_id, status, internal_amount, external_amount, internal_currency, external_currency, timestamp_diff_seconds, ai_status) "
-                          "VALUES (?, ?, ?, ?, ?, ?, ?, 'PENDING');";
-    sqlite3_stmt* exc_stmt;
-    sqlite3_prepare_v2(db_, exc_sql, -1, &exc_stmt, nullptr);
-
-    for (const auto& e : exceptions) {
-        sqlite3_bind_text(exc_stmt, 1, e.transaction_id.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(exc_stmt, 2, e.status.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_double(exc_stmt, 3, e.internal_amount);
-        sqlite3_bind_double(exc_stmt, 4, e.external_amount);
-        sqlite3_bind_text(exc_stmt, 5, e.internal_currency.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(exc_stmt, 6, e.external_currency.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_int64(exc_stmt, 7, e.timestamp_diff_seconds);
-
-        if (sqlite3_step(exc_stmt) != SQLITE_DONE) {
-            sqlite3_finalize(exc_stmt);
-            sqlite3_exec(db_, "ROLLBACK;", nullptr, nullptr, nullptr);
-            log_audit("DB_ERROR", e.transaction_id, batch_id, "ENGINE", "Failed to insert exception");
-            return false;
-        }
-        sqlite3_reset(exc_stmt);
-    }
-    sqlite3_finalize(exc_stmt);
-
-    sqlite3_exec(db_, "COMMIT;", nullptr, nullptr, nullptr);
     return true;
 }
 
-void Database::log_audit(const std::string& event_type, const std::string& tx_id, const std::string& batch_id, const std::string& component, const std::string& message) {
-    const char* sql = "INSERT INTO audit_logs (timestamp, event_type, transaction_id, batch_id, component, message) VALUES (?, ?, ?, ?, ?, ?);";
+bool Database::commit() {
+    char* err_msg = nullptr;
+    if (sqlite3_exec(db_, "COMMIT;", nullptr, nullptr, &err_msg) != SQLITE_OK) {
+        log_error("commit");
+        if (err_msg) sqlite3_free(err_msg);
+        return false;
+    }
+    return true;
+}
+
+bool Database::rollback() {
+    char* err_msg = nullptr;
+    if (sqlite3_exec(db_, "ROLLBACK;", nullptr, nullptr, &err_msg) != SQLITE_OK) {
+        log_error("rollback");
+        if (err_msg) sqlite3_free(err_msg);
+        return false;
+    }
+    return true;
+}
+
+// Strict bind helper functions with return code validation
+inline bool safe_bind_text(sqlite3_stmt* stmt, int idx, const std::string& val) {
+    return sqlite3_bind_text(stmt, idx, val.c_str(), -1, SQLITE_TRANSIENT) == SQLITE_OK;
+}
+
+inline bool safe_bind_opt_text(sqlite3_stmt* stmt, int idx, const std::optional<std::string>& val) {
+    if (val) {
+        return sqlite3_bind_text(stmt, idx, val->c_str(), -1, SQLITE_TRANSIENT) == SQLITE_OK;
+    } else {
+        return sqlite3_bind_null(stmt, idx) == SQLITE_OK;
+    }
+}
+
+inline bool safe_bind_int64(sqlite3_stmt* stmt, int idx, int64_t val) {
+    return sqlite3_bind_int64(stmt, idx, val) == SQLITE_OK;
+}
+
+inline bool safe_bind_opt_int64(sqlite3_stmt* stmt, int idx, const std::optional<int64_t>& val) {
+    if (val) {
+        return sqlite3_bind_int64(stmt, idx, *val) == SQLITE_OK;
+    } else {
+        return sqlite3_bind_null(stmt, idx) == SQLITE_OK;
+    }
+}
+
+inline bool safe_bind_opt_double(sqlite3_stmt* stmt, int idx, const std::optional<double>& val) {
+    if (val) {
+        return sqlite3_bind_double(stmt, idx, *val) == SQLITE_OK;
+    } else {
+        return sqlite3_bind_null(stmt, idx) == SQLITE_OK;
+    }
+}
+
+bool Database::save_batch(const Batch& batch) {
+    const char* sql = "INSERT INTO batches (batch_id, status, started_at, completed_at, engine_version, total_records, matched_records, exception_records) "
+                      "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+                      "ON CONFLICT(batch_id) DO UPDATE SET "
+                      "status=excluded.status, completed_at=excluded.completed_at, total_records=excluded.total_records, "
+                      "matched_records=excluded.matched_records, exception_records=excluded.exception_records;";
+                      
     sqlite3_stmt* stmt;
-    if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
-        sqlite3_bind_int64(stmt, 1, std::time(nullptr));
-        sqlite3_bind_text(stmt, 2, event_type.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(stmt, 3, tx_id.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(stmt, 4, batch_id.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(stmt, 5, component.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(stmt, 6, message.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_step(stmt);
+    if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        log_error("prepare save_batch");
+        return false;
+    }
+
+    if (!safe_bind_text(stmt, 1, batch.batch_id) ||
+        !safe_bind_text(stmt, 2, batch.status) ||
+        !safe_bind_int64(stmt, 3, batch.started_at) ||
+        !safe_bind_opt_int64(stmt, 4, batch.completed_at) ||
+        !safe_bind_text(stmt, 5, batch.engine_version) ||
+        !safe_bind_int64(stmt, 6, batch.total_records) ||
+        !safe_bind_int64(stmt, 7, batch.matched_records) ||
+        !safe_bind_int64(stmt, 8, batch.exception_records)) {
+        log_error("bind save_batch");
+        sqlite3_finalize(stmt);
+        return false;
+    }
+
+    bool success = (sqlite3_step(stmt) == SQLITE_DONE);
+    if (!success) log_error("step save_batch");
+    
+    sqlite3_finalize(stmt);
+    return success;
+}
+
+bool Database::save_internal_transactions(const std::vector<InternalTransaction>& txs) {
+    if (txs.empty()) return true;
+    const char* sql = "INSERT INTO internal_transactions (batch_id, transaction_id, amount, tax, currency, timestamp, status) "
+                      "VALUES (?, ?, ?, ?, ?, ?, ?) "
+                      "ON CONFLICT(batch_id, transaction_id) DO UPDATE SET "
+                      "amount=excluded.amount, tax=excluded.tax, currency=excluded.currency, timestamp=excluded.timestamp, status=excluded.status;";
+                      
+    sqlite3_stmt* stmt;
+    if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        log_error("prepare save_internal_transactions");
+        return false;
+    }
+
+    for (const auto& tx : txs) {
+        if (!safe_bind_text(stmt, 1, tx.batch_id) ||
+            !safe_bind_text(stmt, 2, tx.transaction_id) ||
+            !safe_bind_int64(stmt, 3, tx.amount) ||
+            !safe_bind_int64(stmt, 4, tx.tax) ||
+            !safe_bind_text(stmt, 5, tx.currency) ||
+            !safe_bind_int64(stmt, 6, tx.timestamp) ||
+            !safe_bind_text(stmt, 7, tx.status)) {
+            log_error("bind save_internal_transactions");
+            sqlite3_finalize(stmt);
+            return false;
+        }
+
+        if (sqlite3_step(stmt) != SQLITE_DONE) {
+            log_error("step save_internal_transactions");
+            sqlite3_finalize(stmt);
+            return false;
+        }
+        sqlite3_reset(stmt);
     }
     sqlite3_finalize(stmt);
+    return true;
+}
+
+bool Database::save_bank_settlements(const std::vector<BankSettlement>& settlements) {
+    if (settlements.empty()) return true;
+    const char* sql = "INSERT INTO bank_settlements (batch_id, settlement_id, transaction_id, amount, tax, currency, timestamp) "
+                      "VALUES (?, ?, ?, ?, ?, ?, ?) "
+                      "ON CONFLICT(batch_id, settlement_id) DO UPDATE SET "
+                      "transaction_id=excluded.transaction_id, amount=excluded.amount, tax=excluded.tax, currency=excluded.currency, timestamp=excluded.timestamp;";
+
+    sqlite3_stmt* stmt;
+    if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        log_error("prepare save_bank_settlements");
+        return false;
+    }
+
+    for (const auto& bs : settlements) {
+        if (!safe_bind_text(stmt, 1, bs.batch_id) ||
+            !safe_bind_text(stmt, 2, bs.settlement_id) ||
+            !safe_bind_opt_text(stmt, 3, bs.transaction_id) ||
+            !safe_bind_int64(stmt, 4, bs.amount) ||
+            !safe_bind_int64(stmt, 5, bs.tax) ||
+            !safe_bind_text(stmt, 6, bs.currency) ||
+            !safe_bind_int64(stmt, 7, bs.timestamp)) {
+            log_error("bind save_bank_settlements");
+            sqlite3_finalize(stmt);
+            return false;
+        }
+
+        if (sqlite3_step(stmt) != SQLITE_DONE) {
+            log_error("step save_bank_settlements");
+            sqlite3_finalize(stmt);
+            return false;
+        }
+        sqlite3_reset(stmt);
+    }
+    sqlite3_finalize(stmt);
+    return true;
+}
+
+bool Database::save_reconciliation_results(const std::vector<ReconciliationResult>& results) {
+    if (results.empty()) return true;
+    const char* sql = "INSERT INTO reconciliation_results (batch_id, transaction_id, settlement_id, result, internal_amount, external_amount, internal_tax, external_tax, currency, timestamp_diff_seconds, reason) "
+                      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                      "ON CONFLICT(batch_id, transaction_id) DO UPDATE SET "
+                      "settlement_id=excluded.settlement_id, result=excluded.result, internal_amount=excluded.internal_amount, "
+                      "external_amount=excluded.external_amount, internal_tax=excluded.internal_tax, external_tax=excluded.external_tax, "
+                      "currency=excluded.currency, timestamp_diff_seconds=excluded.timestamp_diff_seconds, reason=excluded.reason;";
+
+    sqlite3_stmt* stmt;
+    if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        log_error("prepare save_reconciliation_results");
+        return false;
+    }
+
+    for (const auto& r : results) {
+        if (!safe_bind_text(stmt, 1, r.batch_id) ||
+            !safe_bind_text(stmt, 2, r.transaction_id) ||
+            !safe_bind_opt_text(stmt, 3, r.settlement_id) ||
+            !safe_bind_text(stmt, 4, r.result) ||
+            !safe_bind_opt_int64(stmt, 5, r.internal_amount) ||
+            !safe_bind_opt_int64(stmt, 6, r.external_amount) ||
+            !safe_bind_opt_int64(stmt, 7, r.internal_tax) ||
+            !safe_bind_opt_int64(stmt, 8, r.external_tax) ||
+            !safe_bind_opt_text(stmt, 9, r.currency) ||
+            !safe_bind_opt_int64(stmt, 10, r.timestamp_diff_seconds) ||
+            !safe_bind_opt_text(stmt, 11, r.reason)) {
+            log_error("bind save_reconciliation_results");
+            sqlite3_finalize(stmt);
+            return false;
+        }
+
+        if (sqlite3_step(stmt) != SQLITE_DONE) {
+            log_error("step save_reconciliation_results");
+            sqlite3_finalize(stmt);
+            return false;
+        }
+        sqlite3_reset(stmt);
+    }
+    sqlite3_finalize(stmt);
+    return true;
+}
+
+bool Database::save_exceptions(const std::vector<ExceptionRecord>& exceptions) {
+    if (exceptions.empty()) return true;
+    
+    const char* sql = "INSERT INTO exceptions (batch_id, transaction_id, detected_status, internal_amount, external_amount, internal_tax, external_tax, currency, timestamp_diff_seconds, reconciliation_reason, ai_status, created_at, updated_at) "
+                      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                      "ON CONFLICT(batch_id, transaction_id) DO UPDATE SET "
+                      "detected_status=excluded.detected_status, internal_amount=excluded.internal_amount, external_amount=excluded.external_amount, "
+                      "internal_tax=excluded.internal_tax, external_tax=excluded.external_tax, currency=excluded.currency, "
+                      "timestamp_diff_seconds=excluded.timestamp_diff_seconds, reconciliation_reason=excluded.reconciliation_reason, updated_at=excluded.updated_at;";
+
+    sqlite3_stmt* stmt;
+    if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        log_error("prepare save_exceptions");
+        return false;
+    }
+
+    for (const auto& e : exceptions) {
+        if (!safe_bind_text(stmt, 1, e.batch_id) ||
+            !safe_bind_text(stmt, 2, e.transaction_id) ||
+            !safe_bind_text(stmt, 3, e.detected_status) ||
+            !safe_bind_opt_int64(stmt, 4, e.internal_amount) ||
+            !safe_bind_opt_int64(stmt, 5, e.external_amount) ||
+            !safe_bind_opt_int64(stmt, 6, e.internal_tax) ||
+            !safe_bind_opt_int64(stmt, 7, e.external_tax) ||
+            !safe_bind_opt_text(stmt, 8, e.currency) ||
+            !safe_bind_opt_int64(stmt, 9, e.timestamp_diff_seconds) ||
+            !safe_bind_opt_text(stmt, 10, e.reconciliation_reason) ||
+            !safe_bind_text(stmt, 11, e.ai_status) ||
+            !safe_bind_int64(stmt, 12, e.created_at) ||
+            !safe_bind_opt_int64(stmt, 13, e.updated_at)) {
+            log_error("bind save_exceptions");
+            sqlite3_finalize(stmt);
+            return false;
+        }
+
+        if (sqlite3_step(stmt) != SQLITE_DONE) {
+            log_error("step save_exceptions");
+            sqlite3_finalize(stmt);
+            return false;
+        }
+        sqlite3_reset(stmt);
+    }
+    sqlite3_finalize(stmt);
+    return true;
+}
+
+bool Database::update_exception_ai(
+    const std::string& batch_id,
+    const std::string& transaction_id,
+    const std::string& ai_status,
+    const std::optional<std::string>& ai_classification,
+    const std::optional<double>& ai_confidence,
+    const std::optional<std::string>& ai_reason,
+    const std::optional<std::string>& ai_recommended_action,
+    int64_t updated_at
+) {
+    const char* sql = "UPDATE exceptions SET "
+                      "ai_status = ?, "
+                      "ai_classification = ?, "
+                      "ai_confidence = ?, "
+                      "ai_reason = ?, "
+                      "ai_recommended_action = ?, "
+                      "updated_at = ? "
+                      "WHERE batch_id = ? AND transaction_id = ?;";
+
+    sqlite3_stmt* stmt;
+    if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        log_error("prepare update_exception_ai");
+        return false;
+    }
+
+    if (!safe_bind_text(stmt, 1, ai_status) ||
+        !safe_bind_opt_text(stmt, 2, ai_classification) ||
+        !safe_bind_opt_double(stmt, 3, ai_confidence) ||
+        !safe_bind_opt_text(stmt, 4, ai_reason) ||
+        !safe_bind_opt_text(stmt, 5, ai_recommended_action) ||
+        !safe_bind_int64(stmt, 6, updated_at) ||
+        !safe_bind_text(stmt, 7, batch_id) ||
+        !safe_bind_text(stmt, 8, transaction_id)) {
+        log_error("bind update_exception_ai");
+        sqlite3_finalize(stmt);
+        return false;
+    }
+
+    if (sqlite3_step(stmt) != SQLITE_DONE) {
+        log_error("step update_exception_ai");
+        sqlite3_finalize(stmt);
+        return false;
+    }
+
+    if (sqlite3_changes(db_) != 1) {
+        std::cerr << "[Database Error] update_exception_ai: exception not found."
+                  << std::endl;
+        sqlite3_finalize(stmt);
+        return false;
+    }
+
+    sqlite3_finalize(stmt);
+    return true;
+}
+
+bool Database::save_audit_log(int64_t timestamp, const std::string& batch_id, const std::optional<std::string>& transaction_id, 
+                              const std::string& event_type, const std::string& component, const std::string& status, const std::string& message) {
+    const char* sql = "INSERT INTO audit_logs (timestamp, batch_id, transaction_id, event_type, component, status, message) "
+                      "VALUES (?, ?, ?, ?, ?, ?, ?);";
+                      
+    sqlite3_stmt* stmt;
+    if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        log_error("prepare save_audit_log");
+        return false;
+    }
+
+    if (!safe_bind_int64(stmt, 1, timestamp) ||
+        !safe_bind_text(stmt, 2, batch_id) ||
+        !safe_bind_opt_text(stmt, 3, transaction_id) ||
+        !safe_bind_text(stmt, 4, event_type) ||
+        !safe_bind_text(stmt, 5, component) ||
+        !safe_bind_text(stmt, 6, status) ||
+        !safe_bind_text(stmt, 7, message)) {
+        log_error("bind save_audit_log");
+        sqlite3_finalize(stmt);
+        return false;
+    }
+
+    bool success = (sqlite3_step(stmt) == SQLITE_DONE);
+    if (!success) log_error("step save_audit_log");
+    
+    sqlite3_finalize(stmt);
+    return success;
 }

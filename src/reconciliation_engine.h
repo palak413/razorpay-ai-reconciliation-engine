@@ -1,14 +1,13 @@
 #ifndef RECONCILIATION_ENGINE_H
 #define RECONCILIATION_ENGINE_H
 
-#include <vector>
-#include <unordered_map>
 #include <string>
+#include <vector>
 #include "models.h"
 
 class ReconciliationEngine {
 public:
-    ReconciliationEngine(const std::string& engine_version = "v1.0.0");
+    explicit ReconciliationEngine(const std::string& engine_version);
 
     void process(
         const std::vector<InternalTransaction>& internal_txs,
@@ -19,6 +18,7 @@ public:
 
 private:
     std::string version_;
+    static constexpr int64_t TIMESTAMP_TOLERANCE_SECONDS = 86400; // 24-hour window
 };
 
-#endif
+#endif // RECONCILIATION_ENGINE_H

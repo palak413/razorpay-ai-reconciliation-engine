@@ -3,31 +3,52 @@
 
 #include <string>
 #include <vector>
+#include <optional>
 #include <sqlite3.h>
 #include "models.h"
 
 class Database {
 public:
-    Database(const std::string& db_path);
+    explicit Database(const std::string& db_path);
     ~Database();
 
-    bool open();
-    void close();
+    bool connect();
+    void disconnect();
 
-    std::vector<InternalTransaction> get_internal_transactions();
-    std::vector<BankSettlement> get_bank_settlements();
+    bool begin_transaction();
+    bool commit();
+    bool rollback();
 
-    bool save_results_and_exceptions(
-        const std::vector<ReconciliationResult>& results,
-        const std::vector<ExceptionRecord>& exceptions,
-        const std::string& batch_id
+    bool save_batch(const Batch& batch);
+    bool save_internal_transactions(const std::vector<InternalTransaction>& txs);
+    bool save_bank_settlements(const std::vector<BankSettlement>& settlements);
+    bool save_reconciliation_results(const std::vector<ReconciliationResult>& results);
+    bool save_exceptions(const std::vector<ExceptionRecord>& exceptions);
+    
+    bool update_exception_ai(
+        const std::string& batch_id,
+        const std::string& transaction_id,
+        const std::string& ai_status,
+        const std::optional<std::string>& ai_classification,
+        const std::optional<double>& ai_confidence,
+        const std::optional<std::string>& ai_reason,
+        const std::optional<std::string>& ai_recommended_action,
+        int64_t updated_at
     );
 
-    void log_audit(const std::string& event_type, const std::string& tx_id, const std::string& batch_id, const std::string& component, const std::string& message);
+    bool save_audit_log(int64_t timestamp,
+                        const std::string& batch_id,
+                        const std::optional<std::string>& transaction_id,
+                        const std::string& event_type,
+                        const std::string& component,
+                        const std::string& status,
+                        const std::string& message);
 
 private:
     std::string db_path_;
-    sqlite3* db_;
+    sqlite3* db_ = nullptr;
+
+    void log_error(const std::string& operation);
 };
 
-#endif
+#endif // DATABASE_H
