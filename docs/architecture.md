@@ -1,8 +1,10 @@
+```markdown
 # Multi-Source Reconciliation Engine Architecture
 
 ## Overview
 This engine reconciles internal merchant payment ledgers against external bank settlement streams with zero tolerance for floating-point drift or false-positive fuzziness.
 
+## System Flow Architecture
 ```mermaid
 graph TD
     A[Internal Ledger CSV] --> B(SQLite Database WAL Mode)
