@@ -15,7 +15,7 @@ This project implements an enterprise-grade, deterministic financial reconciliat
 
 ## 3. Architecture
 
-```text
+
 CSV Inputs (Internal Ledger & Bank Settlements)
    │
    ▼
